@@ -1,52 +1,81 @@
-#!/usr/bin/python
-#coding: utf-8
-
 import boto3
-import smtplib
-import requests
+import csv
+import time
+from reportlab.lib.pagesizes import landscape
+from reportlab.lib.units import inch
+from reportlab.platypus import SimpleDocTemplate, Table
+from reportlab.lib import colors
 
-# Credenciais para enviar e-mails
-smtp_server = "smtp.example.com"
-smtp_port = 587
-smtp_username = "user@example.com"
-smtp_password = "secret_password"
-from_email = "alerts@example.com"
-to_email = "recipient@example.com"
+# credenciais
+access_key = "access_key"
+secret_key = "secret_key"
 
-# Token de Bot do Telegram
-telegram_token = "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-telegram_chat_id = "1234567890"
+# Cria uma nova instancia
+iam_client = boto3.client(
+    'iam',
+    aws_access_key_id=access_key,
+    aws_secret_access_key=secret_key
+)
 
-# Inicialização da sessão boto3
-s3 = boto3.resource('s3')
+# Gera um novo relatorio
+response = iam_client.generate_credential_report()
 
-# Função para enviar alertas por e-mail
-def send_email_alert(subject, body):
-    message = f"From: {from_email}\nTo: {to_email}\nSubject: {subject}\n\n{body}"
-    with smtplib.SMTP(smtp_server, smtp_port) as smtp:
-        smtp.ehlo()
-        smtp.starttls()
-        smtp.ehlo()
-        smtp.login(smtp_username, smtp_password)
-        smtp.sendmail(from_email, to_email, message)
+# Aguarda até o relatorio ser gerado
+while True:
+    try:
+        report_response = iam_client.get_credential_report()
+        if 'Content' in report_response:
+            break
+    except iam_client.exceptions.CredentialReportNotReadyException:
+        print("Report is not yet ready. Waiting 5 seconds...")
+        time.sleep(5)
 
-# Função para enviar alertas pelo Telegram
-def send_telegram_alert(message):
-    url = f"https://api.telegram.org/bot{telegram_token}/sendMessage?chat_id={telegram_chat_id}&text={message}"
-    requests.get(url)
+# Decoda as strings UTF-8 se houverem
+report_content = report_response['Content'].decode('utf-8')
+rows = report_content.split('\n')
 
-# Monitoramento de buckets S3
-for bucket in s3.buckets.all():
-    current_objects = set()
-    for obj in bucket.objects.all():
-        current_objects.add(obj.key)
+# Gera o CSV
+csv_file_path = 'name.csv'
+with open(csv_file_path, 'w', newline='') as file:
+    writer = csv.DictWriter(file, fieldnames=rows[0].split(','))
+    writer.writeheader()
+    for row in rows[1:]:
+        if row:
+            writer.writerow(dict(zip(rows[0].split(','), row.split(','))))
 
-    # Verifica se houve mudanças nos objetos do bucket
-    if current_objects != set(bucket.previous_objects):
-        subject = f"Alerta: Mudanças no bucket S3 {bucket.name}"
-        body = "Houve mudanças nos objetos deste bucket. Por favor, verifique."
-        send_email_alert(subject, body)
-        send_telegram_alert(subject + "\n" + body)
+# Gera o relatório PDF
+pdf_file_path = 'name.pdf'
 
-    # Atualiza a lista de objetos para o próximo monitoramento
-    bucket.previous_objects = current_objects
+# seta o tamanho da pagina
+page_width = 45 * inch
+page_height = 10.5 * inch
+
+doc = SimpleDocTemplate(pdf_file_path, pagesize=(page_width, page_height), leftMargin=0.5 * inch, rightMargin=0.5 * inch,
+                        topMargin=0.5 * inch, bottomMargin=0.5 * inch)
+
+# Define a largura da coluna
+num_columns = len(rows[0].split(','))
+col_widths = None  # Ajusta o tamanho da coluna automaticamente
+
+table_data = [rows[0].split(',')] + [row.split(',') for row in rows[1:] if row]
+table = Table(table_data, colWidths=col_widths, repeatRows=1)
+
+# estilo da tabela
+table.setStyle(
+    [
+        ('BACKGROUND', (0, 0), (-1, 0), colors.darkgreen),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.wheat),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica'),
+        ('FONTSIZE', (0, 0), (-1, 0), 10),  # seta o tamanho da fonte
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+        ('GRID', (0, 0), (-1, -1), 1, colors.black),
+    ]
+)
+
+elements = [table]
+doc.build(elements)
+
+# Mostra o nome do arquivo salvo
+print("Credential report saved to:", pdf_file_path)
